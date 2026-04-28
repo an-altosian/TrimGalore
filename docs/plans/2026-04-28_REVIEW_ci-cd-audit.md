@@ -244,6 +244,23 @@ Prioritized for value-per-effort.  Effort estimates assume a focused session by 
 | 11 | Four `*_trimming_report.txt` files in `test_files/` look like golden references but are unused | "Snapshot regression coverage" appears to exist but does not function. CLAUDE.md (and the original audit-doc draft) called them golden references — that overclaim is now corrected in Part 1. Misleading to future readers until resolved | Easy | Either wire them into a snapshot test, or delete them (and the fully-orphaned `smallRNA_100K_R1.fastq.gz_trimming_report.txt`). See Part 5 §5.5/§5.6 for related candidates that would re-use this infrastructure |
 | 12 | No snapshot-test crate (`insta`, `expect-test`, `goldenfile`) | When the team needs more snapshot-style coverage they hand-roll it; the orphan in #11 is plausibly a casualty of that. Several Part 5 candidates would benefit (#5.4 trimming-report text drift, follow-up coverage of #232/#233 wider report shapes) | Easy | Adopt `insta` (most widely used in Rust projects); reduces friction for the wave of bug-derived tests in Part 5 |
 | 13 | `// ── #NNN regression: ──` convention applied to only 2 issues out of the bug-fix list | Excellent pattern, dramatically underused. Not greppable as a project-wide convention until adopted broadly | Trivial (per existing test) | Adopt as project-wide. Backfill on the existing tests that secretly are regression tests (`tg_test_autodetect_illumina_regression`, the `--trim-n × --rrbs` block at `src/trimmer.rs:715-742`); ensure new bug fixes use it |
+| 14 | No property-based testing (`proptest` / `quickcheck`) | Adapter trimming is a textbook fit; properties like `trim(trim(x)) == trim(x)`, "adapter-free reads pass through unchanged", "concat-then-trim == trim-then-concat" catch entire classes of edge-case regressions that example-based unit tests miss. ~50 LOC for a useful first batch | Easy | See Part 6 §A.1 |
+| 15 | No fuzzing (`cargo-fuzz` / `arbitrary`) for FASTQ / gzip / adapter-shorthand / samplesheet parsers | The multi-member gzip bug (Part 5 §5.1) is exactly the class fuzzers catch. `FastqReader::sanity_check` exists precisely because malformed input is real. Each parser is a bounded surface, ~30 LOC harness | Medium | See Part 6 §A.2 |
+| 16 | No mutation testing (`cargo-mutants`) | A one-time run reports which of the 165 unit tests don't catch their corresponding mutants — the answer is often surprising and points to where new tests are most valuable. Re-run after major changes | Easy | See Part 6 §A.3 |
+| 17 | No `tests/` integration suite | Idiomatic Rust convention is `tests/foo.rs` for tests that exercise the public API or binary as a real user would. Currently every test is `#[cfg(test)]` in-tree | Medium | See Part 6 §B.1 |
+| 18 | No CLI-integration tests in Rust (no `assert_cmd` / `Command::new(env!("CARGO_BIN_EXE_…"))`) | The CI `validation` job IS the CLI integration suite, but it's bash inside YAML. Pulling into Rust would let `cargo test` exercise CLI behaviour, run on macOS (Part 4 #3), use nextest (#23) | Medium | See Part 6 §B.2 |
+| 19 | Only 2 doctest examples across all of `src/` | `cargo test` runs doctests by default; this surface is essentially unused. Public functions (e.g., `parse_adapter_specs`, the `Cli::validate()` family) would benefit from `/// ```` examples that double as compile-tested documentation | Easy | See Part 6 §B.3 |
+| 20 | No multi-core determinism regression test | CHANGELOG explicitly claims "byte-identical across core counts" as a property. No test asserts it. ~5 lines: `--cores 1 → md5_a`, `--cores 4 → md5_b`, `assert_eq!(md5_a, md5_b)` on a fixture | Trivial | See Part 6 §B.5 |
+| 21 | No `--help` text drift / snapshot test | What every user sees. A snapshot test (depends on Part 4 #12 — `insta`) would catch unintentional UX changes from a `clap` bump or doc rewrite | Trivial (with #12) | See Part 6 §B.4 |
+| 22 | No performance / memory regression tests | README claims "near-linear speedup up to ~16 cores"; a change that drops `--cores 4` throughput by 50% is invisible to CI. No memory-tracking either | Hard | See Part 6 §B.6/§B.7 |
+| 23 | No `cargo nextest` adoption | Process isolation (matters: at least one test in `adapter.rs` writes to a shared `std::env::temp_dir()` path), per-test timeouts, dramatically better failure output. One-line CI swap | Trivial | See Part 6 §C.1 |
+| 24 | No `Makefile` / `justfile` / `xtask` for local CI parity | Reproducing the `validation` job locally requires reading 17 YAML steps, installing conda + Perl + Cutadapt, mirroring temp-dir paths. A `just validate` target encoding the same logic lets contributors verify locally before pushing | Easy | See Part 6 §C.2 |
+| 25 | No pre-commit / pre-push hooks | `.git/hooks/` has only `.sample` files. Even a `pre-push` hook running `cargo fmt --check && cargo clippy -- -D warnings` would catch most lint failures before they hit CI | Trivial | See Part 6 §C.3 |
+| 26 | No `upload-artifact: if: failure()` for CI debugging | When `validation` fails on PR #240, the `/tmp/op*` outputs that triggered the md5 mismatch are lost. Adding a failure-only artifact upload dramatically shortens debug cycles | Easy | See Part 6 §C.4 |
+| 27 | Perl 0.6.11 oracle is URL-tag-pinned, not SHA-pinned | `https://raw.githubusercontent.com/FelixKrueger/TrimGalore/0.6.11/trim_galore` — tags are mutable in theory. SHA pin hardens the oracle. One-line change in `ci.yml:159` | Trivial | See Part 6 §D.1 |
+| 28 | Cutadapt's bioconda revision not pinned (`cutadapt=5.2` allows new builds within the version) | A new `5.2-1` build could subtly change reference output, silently shifting the validation md5 baseline | Trivial | See Part 6 §D.2 |
+| 29 | Test fixtures are multi-MB binaries in plain git (no LFS) | `truncated.fq.gz` alone is 5.9 MB. Not urgent today; will limit suite growability as more fixtures are added | Easy | See Part 6 §D.3 |
+| 30 | No `CONTRIBUTING.md` | New contributors don't know where to add tests, what convention to follow, or how to run the validation matrix locally. A 30-line file pointing at CLAUDE.md and giving 3 worked examples lowers the bar | Easy | See Part 6 §E.1 |
 
 ### Recommended top-3 to act on first
 
@@ -343,6 +360,204 @@ For each, here's why a regression test is not a priority:
 - **v2.0.0 Cutadapt-section MultiQC parity (commit `eedbc66`)** — covered indirectly by the CI `validation` md5 comparison and partly by the #232 / #233 unit tests.
 - **v0.6.11 / older Perl-era bugs whose fixes are in dead Perl code, not Rust.** Tecan kit incompatibility and MseI handling are documentation issues, not regression-test gaps.
 - **`maxn_fraction` declaration bug (v0.6.9)** — `filters.rs` already has `test_filter_too_many_n_fraction` covering this surface.
+
+## Part 6 — Testing dimensions not yet exercised
+
+Part 4 enumerates *gaps in what's present*; Part 6 enumerates *whole categories of testing that aren't present at all*.
+Each subsection gives a concrete sketch of the addition, not just a description of the gap, so future sessions can pick a row and ship it.
+
+The investment shape so far has been heavily example-based (165 unit tests + 17 CI validation steps + one Perl oracle).
+Technique diversity, fixture-failure observability, and convention documentation have received much less attention.
+That was a coherent shape for a faithful-rewrite project — the oracle is the spine — but as v2.x grows beyond pure parity (poly-G, generic poly-A, JSON reports) the oracle becomes a smaller fraction of the behaviour space.
+
+### §A — Test methodologies absent
+
+#### §A.1 — Property-based testing
+
+Add `proptest = "1"` (or `quickcheck`) to `[dev-dependencies]`.
+Start with `quality.rs` and `adapter.rs` because they are pure functions over `&[u8]`.
+
+Useful properties to encode:
+
+- **Idempotence:** `trim(trim(x)) == trim(x)` for any read.
+- **Adapter-free invariant:** if `read` contains no adapter substring, `trim(read) == read`.
+- **Suffix property:** the trimmed output is always a prefix of the input (3' trimming) — never longer, never reordered.
+- **Composition:** `trim_then_quality(x) == quality_then_trim(x)` *iff* the order is documented as commutative; otherwise the property catches that someone changed the order.
+- **`bp_after_cutadapt` invariant** (from #232): for non-RRBS reads, `result.bp_after_cutadapt == record.seq.len()`. This single property would have caught the bug that motivated the four explicit unit tests.
+
+#### §A.2 — Fuzzing
+
+Add a `fuzz/` directory using `cargo-fuzz`. Bounded surfaces worth fuzz harnesses:
+
+| Target | Harness sketch |
+|---|---|
+| `FastqReader` | Feed arbitrary bytes (raw + gzipped, including multi-member); assert no panic, no infinite loop |
+| Adapter shorthand parser | Feed arbitrary strings to `parse_adapter_specs`; assert either valid `Vec<Adapter>` or clean error |
+| Demux samplesheet parser | Feed arbitrary bytes; assert either valid samplesheet or clean error (no panic on CRLF / NUL / UTF-8 boundaries) |
+| `--fastqc_args` parser | Feed arbitrary strings to `apply_fastqc_args`; assert no panic |
+
+A weekly CI cron job running fuzzers for 30 minutes each on a corpus seeded from `test_files/` is a low-friction way to keep this honest.
+
+#### §A.3 — Mutation testing
+
+`cargo install cargo-mutants`, then `cargo mutants --in-place=false` on a separate branch.
+The output is a per-file report of mutants that survived (i.e., passed all tests) — those are the tests that don't actually catch what they claim to.
+
+This is high-value as a **one-shot exercise** to identify weak spots, then re-run periodically (e.g., quarterly).
+Don't add it to the CI critical path — runs are slow.
+Treat the first run as a backlog-generation exercise.
+
+### §B — Test categories absent
+
+#### §B.1 — `tests/` integration suite
+
+Create `tests/cli_integration.rs` (and others as the suite grows).
+These tests run via `cargo test` like everything else but exercise the public API or binary as a user would.
+Idiomatic Rust convention; complements (does not replace) the in-tree `#[cfg(test)]` modules.
+
+#### §B.2 — CLI-integration tests
+
+Add `assert_cmd = "2"` and `predicates = "3"` to `[dev-dependencies]`.
+Pull the `validation` job's bash steps into Rust:
+
+```rust
+use assert_cmd::Command;
+let mut cmd = Command::cargo_bin("trim_galore").unwrap();
+cmd.args(["--paired", "test_files/BS-seq_10K_R1.fastq.gz", "test_files/BS-seq_10K_R2.fastq.gz"])
+   .args(["-o", tmp.path().to_str().unwrap()])
+   .assert().success();
+// then assert outputs / md5s
+```
+
+Benefits cascade: `cargo test` runs them, `cargo nextest` parallelises them (§C.1), they run on macOS automatically (Part 4 #3), failure messages are richer than bash `[ "$X" = "$Y" ] || exit 1`.
+
+#### §B.3 — Doctest examples
+
+Add ` ``` ` blocks under `///` for the public API.
+Highest-value targets: `parse_adapter_specs`, `Cli::validate`, `FastqReader::new`, the `report` rendering entry points.
+Doctests are compile-tested documentation — drift between docs and code becomes a CI failure rather than a user complaint.
+
+#### §B.4 — `--help` text drift / snapshot test
+
+After adopting `insta` (Part 4 #12), add:
+
+```rust
+#[test]
+fn help_text_does_not_drift() {
+    let out = Command::cargo_bin("trim_galore").unwrap().arg("--help").output().unwrap();
+    insta::assert_snapshot!(String::from_utf8_lossy(&out.stdout));
+}
+```
+
+Intentional changes are accepted with `cargo insta review`.
+Locks down user-facing surface area against `clap` bumps and casual doc rewrites.
+
+#### §B.5 — Multi-core determinism regression test
+
+CHANGELOG claims byte-identity across core counts. Encode it:
+
+```rust
+#[test]
+fn parallel_output_matches_serial() {
+    let serial   = run_with_cores(1, "test_files/illumina_10K.fastq.gz");
+    let parallel = run_with_cores(4, "test_files/illumina_10K.fastq.gz");
+    assert_eq!(md5(&serial), md5(&parallel));
+}
+```
+
+Catches an entire class of concurrency-ordering regressions in `parallel.rs` (also touches Part 4 #1 and Part 5 §5.2).
+
+#### §B.6 — Performance regression test
+
+Add `criterion = "0.5"` to `[dev-dependencies]` and a `benches/` directory.
+Bench the parallel pipeline at `--cores 1, 2, 4, 8` on a 100K-read fixture.
+Run on every PR (`cargo bench` in a dedicated CI job) and store baseline JSON; alert if a run is >20% slower than the rolling baseline.
+Hard to keep stable on shared CI runners — consider a self-hosted runner if this is going to be load-bearing.
+
+#### §B.7 — Memory regression test
+
+Wrap the global allocator with a tracking shim (`tracking-allocator` crate, or a bespoke `GlobalAlloc` impl) for benchmark builds.
+Assert peak RSS under a known threshold for a fixed input.
+Catches the regression class "someone introduced a `Vec<u8>` accumulator that holds the whole file in memory."
+
+### §C — Test infrastructure / DX gaps
+
+#### §C.1 — `cargo nextest`
+
+Replace `cargo test` with `cargo nextest run` in `ci.yml`'s `rust-tests` job.
+Add a minimal `.config/nextest.toml` if per-test timeouts or grouping are desired.
+Process isolation matters: `src/adapter.rs:767` writes to `std::env::temp_dir().join("tg_test_autodetect_illumina_regression")` — two parallel test invocations of `cargo test` could collide.
+nextest gives one-process-per-test by default.
+
+#### §C.2 — Local CI parity (`justfile` / `Makefile` / `xtask`)
+
+Add `justfile` (smaller deps surface than `make`):
+
+```just
+test:        cargo test
+lint:        cargo fmt --all -- --check && cargo clippy --all-targets --release -- -D warnings
+validate:    ./scripts/validate.sh    # extracted from ci.yml's validation steps
+all:         test lint validate
+```
+
+Move the bash bodies of `ci.yml`'s validation steps into `scripts/validate.sh` so CI calls the same script developers do.
+Single source of truth, no drift.
+
+#### §C.3 — Pre-commit / pre-push hooks
+
+Either commit a `scripts/hooks/pre-push` that contributors symlink, or adopt the `pre-commit` framework with `.pre-commit-config.yaml`.
+Minimum viable hook:
+
+```bash
+#!/bin/sh
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
+```
+
+#### §C.4 — Failure-only artifact upload
+
+In `ci.yml`'s `validation` job, append:
+
+```yaml
+- name: Upload validation outputs on failure
+  if: failure()
+  uses: actions/upload-artifact@<sha-pinned>
+  with:
+    name: validation-outputs
+    path: |
+      /tmp/op*
+      /tmp/tg*
+      /tmp/*.log
+    retention-days: 7
+```
+
+Turns a 30-minute "what did the binary produce that triggered the md5 mismatch?" investigation into a one-click download.
+
+### §D — Oracle / fixture health
+
+#### §D.1 — SHA-pin the Perl oracle
+
+Replace `ci.yml:159` URL `…/0.6.11/trim_galore` with `…/<commit-sha-of-tag-0.6.11>/trim_galore`.
+Tags are mutable in theory — even a deliberate metadata-only tag move would silently shift the oracle.
+
+#### §D.2 — Pin Cutadapt's bioconda revision
+
+`cutadapt=5.2` allows future `5.2-1`, `5.2-2`, etc. revisions.
+Pin to `cutadapt=5.2=*_0` (or whatever the current revision is) and bump deliberately.
+
+#### §D.3 — Fixture size discipline
+
+Not urgent today. Once the suite has 20+ fixtures or a single fixture exceeds 10 MB, consider:
+
+- Move large fixtures to git-LFS.
+- Generate fixtures synthetically in `build.rs` (deterministic seed, written into `target/test_fixtures/`).
+- Or split fixtures into a separate test-data repo and pull them via a `cargo build` script.
+
+### §E — Discoverability / onboarding
+
+#### §E.1 — CONTRIBUTING.md
+
+Even a 30-line file at the repo root pointing at CLAUDE.md and giving three worked examples — "add a unit test", "add a regression-guard CI step", "add a fixture" — would lower the bar for outside contributors.
+The `// ── #NNN regression: ──` convention (Part 4 #13) belongs in here too, alongside any test-naming and fixture-naming conventions you want to make stick.
 
 ## Appendix — references
 
