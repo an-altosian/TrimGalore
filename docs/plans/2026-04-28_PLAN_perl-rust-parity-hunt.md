@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Scaffolded — content fills in over future sessions. **Not started** |
-| **Phase** | Pre-launch — prerequisites pending |
+| **Status** | **Phase 1 + Phase 2 COMPLETE.** 39 differential tests run on 2026-04-28; 3 unintentional regressions found (F1–F3, all HIGH severity). Phase 3 (proptest) + Phase 4 (fuzz) deferred |
+| **Findings** | [docs/plans/2026-04-28_FINDINGS_parity-hunt-phase1-2.md](2026-04-28_FINDINGS_parity-hunt-phase1-2.md) — full results, classifications, and reproducers |
 | **Scope** | Find every place v2.x Rust output diverges from Perl Trim Galore 0.6.11; classify each divergence as intentional (v2.x improvement) or unintentional (regression); document or fix accordingly |
 | **Related** | [docs/plans/2026-04-28_REVIEW_ci-cd-audit.md](2026-04-28_REVIEW_ci-cd-audit.md) — testing audit (Part 6 §A–§D contain prerequisites listed below) |
 | **Author** | Initial scaffold by Claude Code session, dhe@altoslabs.com |
