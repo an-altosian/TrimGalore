@@ -248,8 +248,53 @@ When the input is plain `.fastq`, Perl produces plain `.fq` output (per P3-F2). 
 
 - The default-flag SE path is byte-faithful between Perl and Rust across **263 differential runs** (50 valid-FASTQ + 213 mixed). That's substantially stronger evidence than just the 5 protected fixtures in CI.
 - The two findings P3-F1 and P3-F2 surfaced from harness setup details rather than the random case generators — meaning the *easy*-to-find divergences came from properties of the input format, not from algorithmic edge cases.
-- Phase 3 + 4 cover only the **default-flag SE path**. Same shape can be replicated for `--paired`, `--rrbs`, `--small_rna`, etc., once the harness handles paired input. Each new flag is a ~30-line copy of the existing Phase 3/4 test.
 - Both harnesses are committed to `tests/` and become part of the test suite. They auto-skip when Perl/Cutadapt aren't available, so a normal `cargo test` is unaffected. CI integration (Audit §B.2 + §A.1 + §A.2 prerequisites) would let CI run these on every PR.
+
+## Phase 3+ — Extended harness across 11 flag paths
+
+After the initial Phase 3 SE-default run, the harness was extended to cover 7 additional SE flag paths and 3 PE flag paths (paired-end runner with matched R1/R2 generation). Each test calls into a flag-parameterised `run_parity()` helper.
+
+| Test | Flags | Cases | Wall-clock | Result |
+|---|---|---:|---:|---|
+| `parity_se_default` | (none) | 50 | included | ✅ |
+| `parity_se_rrbs` | `--rrbs` | 20 | | ✅ |
+| `parity_se_small_rna` | `--small_rna` | 20 | | ✅ |
+| `parity_se_length_50` | `--length 50` | 20 | | ✅ |
+| `parity_se_quality_30` | `--quality 30` | 20 | | ✅ |
+| `parity_se_hardtrim5_30` | `--hardtrim5 30` | 20 | | ✅ |
+| `parity_se_bgiseq` | `--bgiseq` | 20 | | ✅ |
+| `parity_se_stranded_illumina` | `--stranded_illumina` | 20 | | ✅ |
+| `parity_pe_default` | `--paired` | 20 | | ✅ |
+| `parity_pe_rrbs` | `--paired --rrbs` | 20 | | ✅ |
+| `parity_pe_small_rna` | `--paired --small_rna` | 20 | | ✅ |
+| **Total** | | **250** | **7 min 11 s** | **11/11 passed** |
+
+### Key finding from the extended run
+
+**No new bugs.** All 11 algorithmic paths are byte-faithful between Perl and Rust across 250 randomized differential cases.
+
+Combined with Phase 4's 213 fuzz cases, **total parity-hunt coverage is now 463 differential runs**. This dramatically narrows where the existing F1/F2/F3 regressions sit:
+
+- `--max_n 0.5` (F1) — CLI float-parse dispatch, NOT in `MaxNFilter` algorithm
+- `--clip_r1` lowercase (F2) — clap definition, NOT in clip-trimming algorithm
+- `--basename` PE filename (F3) — `src/io.rs` filename construction, NOT in trimming pipeline
+- P3-F1 (silent Cutadapt failure) — Perl-side wrapper bug, NOT in v2.x at all
+- P3-F2 (output extension) — output-format dispatch, NOT in compression algorithm
+
+**The algorithmic core of the Rust port is faithful.** The bugs all live in the plumbing — argv parsing, filename construction, output dispatch.
+
+### Coverage gaps remaining
+
+The extended harness covers the 11 most-common flag paths, but still doesn't randomize over:
+
+- **Multi-pair PE** (2+ pairs, the v2.x widening) — would need a "vec of pairs" generator
+- **RRBS variants** — `--non_directional`, `--rrbs --paired` is covered but flag combinations not exhaustively
+- **Demux** (`--demux`) — needs samplesheet generation alongside FASTQ
+- **`--clock` / `--implicon`** specialty modes — different output naming, would need PE generator + flag-aware comparison
+- **Multi-adapter** (`-a SEQ1 -a SEQ2`) — already known intentional divergence, would need to skip this in proptest
+- **Output collisions** (case-only aliases, missing-mid-list) — covered by Phase 1 negative tests, harder to fuzz
+
+Each additional path is roughly a 20-line addition to `tests/parity_proptest.rs`.
 
 ## Summary table
 

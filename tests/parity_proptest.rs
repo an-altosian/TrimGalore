@@ -74,21 +74,25 @@ fn read_gz(path: &Path) -> Vec<u8> {
     buf
 }
 
-/// Run both binaries on `fastq_content`. Returns Ok on parity, Err with message on divergence.
-/// Either-impl-rejects cases return Ok (treated as out-of-corpus, like prop_assume).
-fn run_parity(fastq_content: &str) -> Result<(), String> {
+fn write_gz(path: &Path, content: &str) -> Result<(), String> {
+    let f = fs::File::create(path).map_err(|e| format!("create gz: {e}"))?;
+    let mut enc = GzEncoder::new(f, Compression::default());
+    enc.write_all(content.as_bytes())
+        .map_err(|e| format!("gz write: {e}"))?;
+    enc.finish().map_err(|e| format!("gz finish: {e}"))?;
+    Ok(())
+}
+
+/// Run both binaries on `fastq_content` with the given flags. Returns Ok on parity,
+/// Err with message on divergence. Either-impl-rejects cases return Ok (treated as
+/// out-of-corpus, like prop_assume).
+fn run_parity(fastq_content: &str, flags: &[&str]) -> Result<(), String> {
     let tmp = unique_tmpdir();
     // Write gzipped input so both impls produce .fq.gz output (matches the validation
     // matrix setup; routes around P3-F2 where plain .fastq input causes Perl to emit
     // .fq while Rust emits .fq.gz).
     let input = tmp.join("input.fastq.gz");
-    {
-        let f = fs::File::create(&input).map_err(|e| format!("create input: {e}"))?;
-        let mut enc = GzEncoder::new(f, Compression::default());
-        enc.write_all(fastq_content.as_bytes())
-            .map_err(|e| format!("gz write: {e}"))?;
-        enc.finish().map_err(|e| format!("gz finish: {e}"))?;
-    }
+    write_gz(&input, fastq_content)?;
     let perl_out = tmp.join("perl_out");
     let rust_out = tmp.join("rust_out");
     fs::create_dir_all(&perl_out).map_err(|e| format!("mkdir perl: {e}"))?;
@@ -102,10 +106,12 @@ fn run_parity(fastq_content: &str) -> Result<(), String> {
 
     let perl_res = Command::new(perl_tg())
         .env("PATH", &path_with_cutadapt)
+        .args(flags)
         .args(["-o", perl_out.to_str().unwrap(), input.to_str().unwrap()])
         .output()
         .map_err(|e| format!("perl spawn: {e}"))?;
     let rust_res = Command::new(rust_tg())
+        .args(flags)
         .args(["-o", rust_out.to_str().unwrap(), input.to_str().unwrap()])
         .output()
         .map_err(|e| format!("rust spawn: {e}"))?;
@@ -210,9 +216,204 @@ proptest! {
     #[test]
     fn parity_se_default(fastq in fastq_file(1, 4)) {
         if should_skip() { return Ok(()); }
-        match run_parity(&fastq) {
+        match run_parity(&fastq, &[]) {
             Ok(()) => Ok(()),
             Err(msg) => Err(TestCaseError::fail(msg)),
         }?;
+    }
+}
+
+// SE-with-flags variants — fewer cases per test since the algorithmic core is
+// already stress-tested by parity_se_default; these tests cover flag-dispatch
+// surface area, not algorithm correctness.
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        max_shrink_iters: 50,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn parity_se_rrbs(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--rrbs"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_small_rna(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--small_rna"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_length_50(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--length", "50"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_quality_30(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--quality", "30"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_hardtrim5_30(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--hardtrim5", "30"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_bgiseq(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--bgiseq"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_se_stranded_illumina(fastq in fastq_file(1, 4)) {
+        if should_skip() { return Ok(()); }
+        run_parity(&fastq, &["--stranded_illumina"]).map_err(TestCaseError::fail)?;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Paired-end extension
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Generate a vector of N records as (seq_bytes, qual_bytes) pairs. Each record
+/// will get a shared @readN ID across R1 and R2.
+fn paired_records(min_records: usize, max_records: usize)
+    -> impl Strategy<Value = Vec<((Vec<u8>, Vec<u8>), (Vec<u8>, Vec<u8>))>>
+{
+    prop::collection::vec((record_seq_qual(), record_seq_qual()), min_records..=max_records)
+}
+
+fn pair_to_strings(pairs: &[((Vec<u8>, Vec<u8>), (Vec<u8>, Vec<u8>))]) -> (String, String) {
+    let bases = b"ACGT";
+    let mut r1 = String::new();
+    let mut r2 = String::new();
+    for (i, ((s1, q1), (s2, q2))) in pairs.iter().enumerate() {
+        let s1s: String = s1.iter().map(|&n| bases[n as usize] as char).collect();
+        let q1s: String = q1.iter().map(|&q| q as char).collect();
+        let s2s: String = s2.iter().map(|&n| bases[n as usize] as char).collect();
+        let q2s: String = q2.iter().map(|&q| q as char).collect();
+        // Trim Galore expects matching read IDs across mates; use the same base ID.
+        r1.push_str(&format!("@read{i}/1\n{s1s}\n+\n{q1s}\n"));
+        r2.push_str(&format!("@read{i}/2\n{s2s}\n+\n{q2s}\n"));
+    }
+    (r1, r2)
+}
+
+/// Run both binaries on a paired-end input. Returns Ok on parity.
+fn run_parity_pe(r1_content: &str, r2_content: &str, flags: &[&str]) -> Result<(), String> {
+    let tmp = unique_tmpdir();
+    let r1 = tmp.join("r1.fastq.gz");
+    let r2 = tmp.join("r2.fastq.gz");
+    write_gz(&r1, r1_content)?;
+    write_gz(&r2, r2_content)?;
+    let perl_out = tmp.join("perl_out");
+    let rust_out = tmp.join("rust_out");
+    fs::create_dir_all(&perl_out).map_err(|e| format!("mkdir: {e}"))?;
+    fs::create_dir_all(&rust_out).map_err(|e| format!("mkdir: {e}"))?;
+
+    let path_with_cutadapt = format!(
+        "{}:{}",
+        cutadapt_bin(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let perl_res = Command::new(perl_tg())
+        .env("PATH", &path_with_cutadapt)
+        .args(flags)
+        .args(["-o", perl_out.to_str().unwrap()])
+        .args([r1.to_str().unwrap(), r2.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("perl spawn: {e}"))?;
+    let rust_res = Command::new(rust_tg())
+        .args(flags)
+        .args(["-o", rust_out.to_str().unwrap()])
+        .args([r1.to_str().unwrap(), r2.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("rust spawn: {e}"))?;
+
+    let perl_ok = perl_res.status.success();
+    let rust_ok = rust_res.status.success();
+
+    if !perl_ok && !rust_ok {
+        let _ = fs::remove_dir_all(&tmp);
+        return Ok(());
+    }
+    if perl_ok != rust_ok {
+        let pe = String::from_utf8_lossy(&perl_res.stderr).to_string();
+        let re = String::from_utf8_lossy(&rust_res.stderr).to_string();
+        return Err(format!(
+            "PE ACCEPTANCE MISMATCH flags={flags:?}: perl_rc={} rust_rc={}\nperl: {}\nrust: {}\nR1:\n{r1_content}\nR2:\n{r2_content}",
+            perl_res.status.code().unwrap_or(-1),
+            rust_res.status.code().unwrap_or(-1),
+            &pe.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
+            &re.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
+        ));
+    }
+
+    let mut compared = 0;
+    for entry in fs::read_dir(&perl_out).map_err(|e| format!("readdir: {e}"))? {
+        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if !name_str.ends_with(".fq.gz") {
+            continue;
+        }
+        let rust_path = rust_out.join(&name);
+        if !rust_path.exists() {
+            return Err(format!(
+                "PE RUST MISSING: {name_str} flags={flags:?}\nR1:\n{r1_content}\nR2:\n{r2_content}"
+            ));
+        }
+        let pb = read_gz(&entry.path());
+        let rb = read_gz(&rust_path);
+        if pb != rb {
+            return Err(format!(
+                "PE OUTPUT MISMATCH for {name_str} flags={flags:?}: perl={}b rust={}b\nR1:\n{r1_content}\nR2:\n{r2_content}",
+                pb.len(), rb.len()
+            ));
+        }
+        compared += 1;
+    }
+    let _ = fs::remove_dir_all(&tmp);
+    if compared == 0 {
+        return Err(format!(
+            "PE NO OUTPUTS flags={flags:?}\nR1:\n{r1_content}\nR2:\n{r2_content}"
+        ));
+    }
+    Ok(())
+}
+
+fn paired_fastq() -> impl Strategy<Value = (String, String)> {
+    paired_records(1, 3).prop_map(|pairs| pair_to_strings(&pairs))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        max_shrink_iters: 50,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn parity_pe_default((r1, r2) in paired_fastq()) {
+        if should_skip() { return Ok(()); }
+        run_parity_pe(&r1, &r2, &["--paired"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_pe_rrbs((r1, r2) in paired_fastq()) {
+        if should_skip() { return Ok(()); }
+        run_parity_pe(&r1, &r2, &["--paired", "--rrbs"]).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
+    fn parity_pe_small_rna((r1, r2) in paired_fastq()) {
+        if should_skip() { return Ok(()); }
+        run_parity_pe(&r1, &r2, &["--paired", "--small_rna"]).map_err(TestCaseError::fail)?;
     }
 }
