@@ -472,3 +472,11 @@ Option A is back-compat-safer; Option B has bigger user-facing impact. Either is
 
 Happy to send a PR for any of the top-3 quick wins. The trivial #1 (gzip level toggle) and #3 (batch size) are good first cuts because they're low-risk and the parity harness verifies byte-identity preservation in ~12 minutes.
 
+
+---
+
+## Comment on Issue 7 (#248) — funnel finding
+
+**Posted at:** https://github.com/FelixKrueger/TrimGalore/issues/248#issuecomment-4339553695
+
+**Why posted:** Measuring `gzip=false` to put a number on the upper bound of compression-level tuning revealed a counterintuitive result — at cores=8, disabling gzip is 1.5× slower, not faster. This exposed the main-thread `mpsc → BTreeMap → write_all` funnel as a hidden serial bottleneck. Compression was doing double duty as a bandwidth-shaper. The comment proposes a 5th quick win (per-worker output files) and notes that lowering the gzip level alone may not fully realise the predicted gain at high core counts without first addressing the funnel.

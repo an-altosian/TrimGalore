@@ -87,6 +87,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --paired support hook (for future use): if PROFILE_R2 is set, run PE.
     let r2 = std::env::var("PROFILE_R2").ok();
+    let gzip: bool = env_or("PROFILE_GZIP", "true").parse()?;
+    let out_file = if gzip {
+        out_file
+    } else {
+        out_dir.join("smallRNA_1M_trimmed.fq")
+    };
     let stats = if let Some(r2_str) = r2 {
         let r2_path = PathBuf::from(r2_str);
         let out_r1 = out_dir.join("paired_r1_val_1.fq.gz");
@@ -107,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         s1
     } else {
-        run_single_end_parallel(&input, &out_file, &config, cores, true)?
+        run_single_end_parallel(&input, &out_file, &config, cores, gzip)?
     };
 
     let elapsed = t0.elapsed();
