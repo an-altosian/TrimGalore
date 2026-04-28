@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Phase 1 + Phase 2 COMPLETE.** 39 differential tests run on 2026-04-28; 3 unintentional regressions found (F1–F3, all HIGH severity). Phase 3 (proptest) + Phase 4 (fuzz) deferred |
+| **Status** | **All four phases COMPLETE on 2026-04-28.** Phase 1+2: 39 fixture-based tests, 3 unintentional regressions (F1–F3, HIGH). Phase 3: 50 `proptest` cases on gzipped synthetic FASTQ, 0 additional bugs after harness setup exposed P3-F1 + P3-F2. Phase 4: 213 fuzzed cases over 180s, 0 divergences (123 both-reject + 90 both-accept). 5 total findings; Rust is correct for P3-F1, project-lead triage needed for P3-F2 |
 | **Findings** | [docs/plans/2026-04-28_FINDINGS_parity-hunt-phase1-2.md](2026-04-28_FINDINGS_parity-hunt-phase1-2.md) — full results, classifications, and reproducers |
 | **Scope** | Find every place v2.x Rust output diverges from Perl Trim Galore 0.6.11; classify each divergence as intentional (v2.x improvement) or unintentional (regression); document or fix accordingly |
 | **Related** | [docs/plans/2026-04-28_REVIEW_ci-cd-audit.md](2026-04-28_REVIEW_ci-cd-audit.md) — testing audit (Part 6 §A–§D contain prerequisites listed below) |

@@ -43,6 +43,11 @@ fastqc-rust = "=1.0.1"
 
 [dev-dependencies]
 serde_json = "1"
+# Parity-hunt Phase 3/4 — proptest drives differential testing against
+# Perl Trim Galore 0.6.11 (origin/master:trim_galore). Used by integration
+# tests under tests/parity_*.rs that spawn both binaries on generated input.
+proptest = "1"
+rand = "0.8"
 
 [profile.release]
 opt-level = 3
