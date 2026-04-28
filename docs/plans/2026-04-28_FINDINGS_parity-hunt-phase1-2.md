@@ -20,6 +20,7 @@
 | **F3** | `--basename foo` paired-end filename pattern differs: Perl produces `foo_val_1.fq.gz`, Rust produces `foo_R1_val_1.fq.gz` (extra `_R1`/`_R2` segment). Content md5 matches; only the filename differs | **HIGH** | Phase 1C |
 | **P3-F1** | Perl wrapper exits with code 0 even when Cutadapt fails internally (silent failure on adversarial Q0 input). Rust correctly handles the case and returns 0 only on real success. **Perl-side bug — Rust is correct** | MEDIUM | Phase 3 |
 | **P3-F2** | Output gzip-compression follows input extension in Perl (`.fastq` → `.fq` plain, `.fastq.gz` → `.fq.gz` gzipped) but Rust always gzips. The Phase 1+2 fixtures are all `.fastq.gz` so this never surfaced. Pipelines mixing plain and gzipped inputs see different output filenames. **Behavioural divergence — needs project-lead decision** | MEDIUM | Phase 3 |
+| **P3-F3** | v2.x infers `--paired` from `--clock` and `--implicon`; Perl 0.6.11 requires explicit `--paired` alongside both flags. v2.x convenience widening, undocumented in CHANGELOG. **Likely intentional — needs project-lead confirmation and CHANGELOG mention** | LOW | Phase 3+ (extended harness) |
 
 Plus **2 differences whose intent is ambiguous** and need project-lead triage:
 
@@ -283,18 +284,58 @@ Combined with Phase 4's 213 fuzz cases, **total parity-hunt coverage is now 463 
 
 **The algorithmic core of the Rust port is faithful.** The bugs all live in the plumbing — argv parsing, filename construction, output dispatch.
 
-### Coverage gaps remaining
+### Coverage gaps remaining (after the extension below)
 
-The extended harness covers the 11 most-common flag paths, but still doesn't randomize over:
+After the second extension (multi-pair + specialty modes + --demux), most of the gaps from this section are now covered. Remaining:
 
-- **Multi-pair PE** (2+ pairs, the v2.x widening) — would need a "vec of pairs" generator
-- **RRBS variants** — `--non_directional`, `--rrbs --paired` is covered but flag combinations not exhaustively
-- **Demux** (`--demux`) — needs samplesheet generation alongside FASTQ
-- **`--clock` / `--implicon`** specialty modes — different output naming, would need PE generator + flag-aware comparison
-- **Multi-adapter** (`-a SEQ1 -a SEQ2`) — already known intentional divergence, would need to skip this in proptest
-- **Output collisions** (case-only aliases, missing-mid-list) — covered by Phase 1 negative tests, harder to fuzz
+- **Multi-adapter** (`-a SEQ1 -a SEQ2`) — already known intentional divergence per CHANGELOG beta.3; would need to skip this in proptest
+- **Output collisions** (case-only aliases, missing-mid-list) — covered by Phase 1 negative tests, harder to fuzz randomly
+- **Specific RRBS-with-cutting-site combinations** — partial; could expand
+- **`--retain_unpaired` randomization** — blocked behind F5 triage decision
+- **Heterogeneous pair sizes in multi-pair** — current generator gives 1-2 records per pair, could vary more
 
-Each additional path is roughly a 20-line addition to `tests/parity_proptest.rs`.
+## Phase 3++ — Second extension: multi-pair, specialty modes, demux
+
+Adds 8 more flag paths. Tests the v2.x multi-pair widening, the specialty modes (`--clock`, `--implicon`) that bypass the normal trimming pipeline, and the SE-only `--demux` mode with a fixed samplesheet.
+
+| Test | Flags | Cases | Notes |
+|---|---|---:|---|
+| `parity_pe_rrbs_nondirectional` | `--paired --rrbs --non_directional` | 20 | RRBS variant |
+| `parity_se_hardtrim3` | `--hardtrim3 30` | 20 | Sibling of already-covered `--hardtrim5 30` |
+| `parity_multi_pair_default` | `--paired` (2-3 pairs) | 15 | The v2.x widening (beta-1 reporter scenario) |
+| `parity_multi_pair_rrbs` | `--paired --rrbs` (2-3 pairs) | 15 | Multi-pair RRBS |
+| `parity_multi_pair_clock` | `--clock --paired` (2-3 pairs) | 15 | Multi-pair specialty |
+| `parity_pe_clock` | `--clock --paired` | 20 | Single-pair clock — per-pair UMI extraction |
+| `parity_pe_implicon` | `--implicon --paired` | 20 | UMI from R2 to read IDs of both mates |
+| `parity_se_demux` | `--demux <samplesheet> --no_poly_g` | 15 | 3-barcode samplesheet, most reads route to NoCode |
+| **Subtotal** | | **140** | **8/8 passed** |
+
+### Output-matcher generalisation
+
+`is_output_fastq()` now accepts both `.fq.gz` (the default for normal/paired/RRBS modes) and `.fastq.gz` (notably `--implicon`'s `*_8bp_UMI_R{1,2}.fastq.gz`). The original runner only matched `.fq.gz`, which would have silently classified `--implicon` outputs as missing.
+
+### New finding from the extension iteration
+
+**P3-F3** surfaced when `parity_pe_implicon` initially failed with `Perl rc=255`:
+
+> `running with paired files specified, but the processing is still set to single-end mode. The IMPLICON protocol requires paired-end sequencing with unique molecular identifiers (UMIs) as the first 8bp of READ2. Please respecify...`
+
+Perl 0.6.11 requires `--paired` to be passed *explicitly* alongside `--implicon`. v2.x infers paired-mode from `--implicon` alone (similarly for `--clock`). Same divergence affected `parity_multi_pair_clock` until I passed `--paired` explicitly.
+
+This is a v2.x convenience widening (consistent with the multi-pair widening pattern from beta.4) but is NOT documented in CHANGELOG as intentional. Likely classification: intentional v2.x improvement, mention in CHANGELOG as "`--clock`/`--implicon` now imply `--paired`".
+
+### Combined coverage as of the second extension
+
+| Phase | Cases | Coverage area |
+|---|---:|---|
+| Phase 1+2 (fixture-based) | 39 | 5 protected + 22 single flags + 7 combos + 6 edge cases |
+| Phase 3 (proptest, default SE) | 50 | 1 flag path |
+| Phase 3+ (proptest, 7 SE + 3 PE) | 250 | 11 flag paths |
+| **Phase 3++ (this extension)** | **140** | **8 more flag paths (specialty + multi-pair)** |
+| Phase 4 (fuzz) | 213 | 1 flag path, 3 input strategies |
+| **Grand total** | **692** | **19 flag paths exercised under proptest** |
+
+Combined with the 39 fixture-based tests, the parity hunt has now exercised **31 distinct flag paths** between the two methods, finding 5 unintentional Rust regressions (F1-F3) plus 3 documented v2.x behavioural divergences (P3-F1 Perl-side bug, P3-F2 plain-input output extension, P3-F3 implies-paired) and 1 known intentional divergence (multi-adapter `-a SEQ1 -a SEQ2`).
 
 ## Summary table
 
