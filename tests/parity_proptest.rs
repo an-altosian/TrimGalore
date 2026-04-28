@@ -714,6 +714,38 @@ fn run_parity_demux(fastq: &str, samplesheet: &str, extra_flags: &[&str]) -> Res
 /// so most reads land in NoCode. Both impls should agree on routing regardless.
 const FIXED_SAMPLESHEET: &str = "ACGTACGT\tsample1\nGTCAGTCA\tsample2\nTGCATGCA\tsample3\n";
 
+/// Barcodes from FIXED_SAMPLESHEET, indexed for selection by the strategy.
+const DEMUX_BARCODES: &[&str] = &["ACGTACGT", "GTCAGTCA", "TGCATGCA"];
+
+/// Generate FASTQ where ~50% of records have a samplesheet barcode injected at
+/// the 3' end (replacing the last 8 bases of the random sequence). Exercises
+/// the per-sample matching path of `--demux`, which the random-only generator
+/// almost never hits (~1 in 65K probability per read at 8-char barcode width).
+fn fastq_file_with_barcodes(min_records: usize, max_records: usize)
+    -> impl Strategy<Value = String>
+{
+    prop::collection::vec(
+        (record_seq_qual(), 0u8..3u8, prop::bool::ANY),
+        min_records..=max_records,
+    )
+    .prop_map(|records| {
+        let bases = b"ACGT";
+        let mut out = String::new();
+        for (i, ((nucs, quals), barcode_idx, inject)) in records.iter().enumerate() {
+            let mut seq: String = nucs.iter().map(|&n| bases[n as usize] as char).collect();
+            let qual: String = quals.iter().map(|&q| q as char).collect();
+            if *inject && seq.len() >= 8 {
+                // Replace the last 8 bases of the sequence with a samplesheet barcode.
+                // Quality unchanged; trim_galore reads the 3'-most N bases for matching.
+                let bc = DEMUX_BARCODES[*barcode_idx as usize];
+                seq.replace_range(seq.len() - 8.., bc);
+            }
+            out.push_str(&format!("@read{i}\n{seq}\n+\n{qual}\n"));
+        }
+        out
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 15,
@@ -726,6 +758,17 @@ proptest! {
     /// `--no_poly_g` is required for byte-identity (matches CI validation step).
     #[test]
     fn parity_se_demux(fastq in fastq_file(2, 5)) {
+        if should_skip() { return Ok(()); }
+        run_parity_demux(&fastq, FIXED_SAMPLESHEET, &["--no_poly_g"])
+            .map_err(TestCaseError::fail)?;
+    }
+
+    /// Barcode-aware demux — ~50% of reads have a samplesheet barcode injected
+    /// at the 3' end. Exercises both NoCode and per-sample-matching code paths
+    /// (closes the gap flagged in the #246 issue comment about the original
+    /// demux test only hitting the NoCode path).
+    #[test]
+    fn parity_se_demux_with_matches(fastq in fastq_file_with_barcodes(2, 6)) {
         if should_skip() { return Ok(()); }
         run_parity_demux(&fastq, FIXED_SAMPLESHEET, &["--no_poly_g"])
             .map_err(TestCaseError::fail)?;
