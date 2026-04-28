@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | **FILED 2026-04-28** — all 6 issues live on FelixKrueger/TrimGalore (issues #242 – #247, consecutive) |
+| **Status** | **FILED 2026-04-28** — 7 issues live on FelixKrueger/TrimGalore (issues #242 – #248) |
 | **Target repo** | `FelixKrueger/TrimGalore` |
 | **Filer** | `an-altosian` (via `gh issue create`) |
-| **Source** | Parity-hunt findings + CI/test audit on `optimus_prime` (commit `41926c7`) |
-| **Total** | 6 issues — 3 bug, 1 discussion, 2 tracking |
+| **Source** | Parity-hunt findings + CI/test audit + performance audit on `optimus_prime` |
+| **Total** | 7 issues — 3 bug, 1 discussion, 2 tracking, 1 performance |
 
 ## Filed issues — quick links
 
@@ -18,6 +18,14 @@
 | 4 | Three behavioural divergences for triage | DISCUSSION | <https://github.com/FelixKrueger/TrimGalore/issues/245> |
 | 5 | Test coverage gaps + bug-derived candidates | TRACKING/TESTS | <https://github.com/FelixKrueger/TrimGalore/issues/246> |
 | 6 | CI / test-infrastructure improvements | TRACKING/CI | <https://github.com/FelixKrueger/TrimGalore/issues/247> |
+| 7 | Profiling report: gzip = 60.7% of CPU + 3 quick wins | PERF | <https://github.com/FelixKrueger/TrimGalore/issues/248> |
+
+## Comments posted on filed issues (post-filing additions)
+
+| Issue | Comment | Why |
+|---|---|---|
+| #245 | [P3-F3 (`--clock`/`--implicon` imply `--paired` in v2.x) added as item D](https://github.com/FelixKrueger/TrimGalore/issues/245#issuecomment-4338501630) | Surfaced while extending the parity-hunt harness; same "needs classification" bucket as the original 3 items |
+| #246 | [Extended-coverage update](https://github.com/FelixKrueger/TrimGalore/issues/246#issuecomment-4338537192) | Harness now covers 19 flag paths; 2 of 6 Phase-5 candidates partially exercised; one new gap (demux barcode-matching) flagged |
 
 The body text below is preserved verbatim as filed (with the `**Filed at:**` placeholders now resolved to the URLs above).
 
@@ -333,3 +341,134 @@ gh issue create --repo FelixKrueger/TrimGalore \
     --title "[BUG | HIGH] --max_n 0.5 (fractional) silently ignored — outputs as if no filtering applied" \
     --body-file /tmp/issue1_body.md
 ```
+
+---
+
+## Issue 7 — `[PERF]` Profiling report: gzip dominates 60.7% of CPU + 3 quick-win optimizations (~25–45% wall improvement)
+
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/248
+
+**Body:**
+
+## Summary
+
+Profiling and benchmarking on the `optimus_prime` fork (commit [`a840fc2`](https://github.com/an-altosian/TrimGalore/commit/a840fc2)) confirms **gzip compression accounts for 60.7% of CPU time** at `--cores 1` and 59.1% at `--cores 8`. Three quick-win optimizations targeting the gzip-dominated path could plausibly deliver **25–45% wall-clock improvement** with low total LOC change.
+
+This issue presents the data and proposes concrete changes for triage. Full methodology and per-function review: [`docs/plans/2026-04-28_AUDIT_performance.md`](https://github.com/an-altosian/TrimGalore/blob/optimus_prime/docs/plans/2026-04-28_AUDIT_performance.md).
+
+## Methodology
+
+- **Wall-clock benchmark**: `hyperfine 1.20.0`, 10 runs + 1 warmup discarded per setting.
+- **Sample-based profiling**: `pprof-rs` (POSIX SIGPROF, no kernel perf permissions needed). 10 runs at `--cores 1` and `--cores 8`, folded-stack outputs concatenated, then categorically tallied. Total merged sample budget: 3,950 (cores=1) and 814 (cores=8).
+- **Fixture**: 1M-read synthetic input = `test_files/smallRNA_100K.fastq.gz` × 10 (multi-member gzip — RFC 1952; the reader handles this).
+- **Build**: `cargo build --release` (the project's standard release profile: `lto = true`, `codegen-units = 1`, opt-level 3).
+- **Reproducibility**: full harness committed at `examples/profile_smallrna.rs`; raw artifacts at [`docs/plans/perf_data/`](https://github.com/an-altosian/TrimGalore/tree/optimus_prime/docs/plans/perf_data).
+
+## Wall-clock scaling (1M-read fixture, 10 runs each)
+
+| Cores | Mean (s) | StdDev | Range (min … max) | Speedup vs cores=1 | User time (s) |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 3.044 | ±0.009 (0.3%) | 3.031 … 3.058 | 1.00× | 3.029 |
+| 2 | 1.971 | ±0.016 (0.8%) | 1.950 … 1.997 | 1.55× | 3.898 |
+| 4 | 1.171 | ±0.011 (0.9%) | 1.158 … 1.195 | 2.60× | 4.018 |
+| **8** | **0.954** | ±0.031 (3.2%) | 0.927 … 1.017 | **3.19×** | 4.677 |
+| 16 | 0.974 | ±0.028 (2.9%) | 0.936 … 1.021 | 3.13× | 5.803 |
+| 32 | 0.984 | ±0.043 (4.4%) | 0.889 … 1.029 | 3.09× | 5.866 |
+
+**Two findings worth surfacing**:
+
+1. **The README's "near-linear speedup up to ~16 cores" overstates** the actual behaviour. cores=8/16/32 confidence intervals overlap heavily ([0.892, 1.016] vs [0.918, 1.030] vs [0.898, 1.070]). The plateau is real; the precise knee location is not pinpointable. cores=8 is empirically the fastest mean but not statistically distinct from 16 or 32.
+
+2. **User time grows monotonically with cores** (3.0 → 4.0 → 4.7 → 5.8 → 5.9 from 1→4→8→16→32 cores). At 16+ cores user time roughly doubles vs cores=1 without wall-clock improvement — overhead growth is real but is not localised to a single subsystem (see breakdown below).
+
+md5 byte-identity holds across `--cores` 1–32 (the multi-core determinism property from CHANGELOG, verified empirically across all 60 runs).
+
+## Sample-based CPU breakdown (10-run merged)
+
+| Component | cores=1 (3,950 samples) | cores=8 (814 samples) |
+|---|---:|---:|
+| `zlib_rs` (gzip compression) | **51.9%** | **50.6%** |
+| `trim_galore::trimmer::*` (incl. inlined alignment) | **35.1%** | **35.6%** |
+| `crc32fast` (gzip CRC) | **8.8%** | **8.5%** |
+| `trim_galore::fastq` (I/O, String allocs) | 3.2% | 3.2% |
+| Other | 1.0% | 2.1% |
+
+**Combined gzip work: 60.7% at cores=1, 59.1% at cores=8** — confirms the CHANGELOG estimate "the dominant cost (gzip compression, ~60% of runtime)" to high precision. The proportional breakdown is essentially identical at cores=1 and cores=8, indicating the parallel pipeline scales each subsystem evenly without one becoming a serial bottleneck.
+
+## Top hot functions (cores=1, 3,950-sample merged)
+
+| Inclusive samples | Function |
+|---:|---|
+| 2,435 (61.6%) | `trim_galore::fastq::FastqRecord::write_to` |
+| 1,968 (49.8%) | `zlib_rs::deflate::algorithm::medium::deflate_medium` |
+| 1,377 (34.9%) | `trim_galore::trimmer::trim_read` |
+| 1,376 (34.8%) | `zlib_rs::deflate::longest_match::longest_match` |
+| 349 (8.8%) | `crc32fast::baseline::update_fast_16` |
+
+`FastqRecord::write_to` is the dominant single function — it sits on the gzip critical path: `write_to → write_fmt → write_all → flate2 → deflate_medium → longest_match`. It currently calls `writeln!` 4 times per record (header, sequence, `+`, quality), each writeln passing a small chunk to deflate.
+
+`zlib_rs::deflate::algorithm::medium::deflate_medium` is the deflate algorithm used at compression level 6 (the project's default). Levels 1–3 use `quick`, level 4 uses `quick`, levels 5–9 use `medium`. Lowering from 6 to 4 bypasses `deflate_medium` entirely.
+
+## Proposed quick wins (sample-grounded)
+
+| # | Change | File | Effort | Expected wall improvement |
+|---:|---|---|---|---:|
+| 1 | **Lower default gzip compression level 6 → 4** (or expose `--fast-gz`) | `fastq.rs:454`, `parallel.rs:249,250,252,257,563` | ~5 LOC | **20–35%** |
+| 2 | **Single buffered write per record in `FastqRecord::write_to`** (build into a local `Vec<u8>`, single `write_all`) | `fastq.rs:42-48` | ~15 LOC | **5–10%** |
+| 3 | **Increase per-batch size 4096 → 16384 records** (let deflate see bigger chunks) | `parallel.rs:32`, `fastq.rs:126` | ~2 LOC | **3–8%** |
+
+Composite estimate for items 1+2+3: **25–45% wall-clock improvement** at `--cores 8` on the 1M-read fixture, all targeting gzip dominance directly. None require algorithmic changes.
+
+A larger discrete optimisation worth considering separately:
+
+| # | Change | Effort | Expected gain |
+|---:|---|---|---:|
+| 4 | **Myers' bit-parallel edit distance** for adapters ≤64 bp (replace the semi-global DP in `alignment.rs::find_3prime_adapter`) | ~400 LOC + tests | **10–20%** of total wall (cuts the 36% `trim_read` budget by ~30%) |
+
+This is a higher-risk change because the existing DP is the parity oracle for 19 flag paths in `tests/parity_proptest.rs`. Any replacement must preserve byte-identity (verifiable by running the harness — ~12 minutes).
+
+## Points where the original code-review-only audit was wrong
+
+For the methodology record (these are surfaced to help calibrate future code-review-only estimates):
+
+- **`String → Vec<u8>` for `FastqRecord::seq`/`qual`**: code-review predicted 5–15% wall improvement. Sample data: fastq module is 3.2% of total. Real impact: 1–3%. Worth doing for ergonomics (eliminates `.as_bytes()` boilerplate) but not for perf.
+- **Flat DP matrix in `find_3prime_adapter`**: predicted 5–10% wall improvement from eliminating per-call `Vec<Vec<usize>>` allocation. Sample data: invisible at this resolution. Real impact: <1%.
+- **Threaded-reader `Vec<Option<FastqRecord>>` instead of `mem::replace` with empty Strings**: predicted 2–5%. Sample data: doesn't appear in top frames. Real impact: <1%.
+
+The lesson: **code-review estimates of allocation cost without sample data systematically overestimate**. Modern allocators are very fast for sub-1KB allocations (tens of nanoseconds); 1M of them adds up to ~50 ms, drowned in 4.3 seconds of gzip work.
+
+## Verification approach for any optimisation
+
+Before merging any item from the proposed list:
+
+1. **Run `tests/parity_proptest.rs`** (~12 minutes) — verify byte-identity preserved across 20 flag paths against Perl 0.6.11.
+2. **Run the wall-clock benchmark** (`hyperfine` invocation in [`docs/plans/perf_data/hyperfine_scaling_10runs.md`](https://github.com/an-altosian/TrimGalore/blob/optimus_prime/docs/plans/perf_data/hyperfine_scaling_10runs.md)) at `--cores 1` and `--cores 8`, compare against the baseline numbers in the audit doc.
+3. **Run `examples/profile_smallrna.rs`** at the new compression level and confirm zlib_rs's share of CPU drops.
+4. **Run the CI `validation` job locally** — md5-compare against Perl 0.6.11 across all 5 protected paths.
+
+For lowering the default compression level (item 1): note that **changing the default level breaks the validation matrix's md5 oracle** (gzip output bytes will differ even though decompressed content matches). Two ways to handle:
+
+- **Option A**: keep level 6 as default, add `--fast-gz` (or `--compression-level N`) flag for users who want speed. Validation matrix unchanged.
+- **Option B**: change default to level 4 globally, update the validation matrix's expected md5s, document the change in CHANGELOG. Faster by default but breaks back-compat for anyone diffing v2.x output bytes against earlier versions.
+
+Option A is back-compat-safer; Option B has bigger user-facing impact. Either is fine — needs a project-lead decision.
+
+## What deliberately should NOT change (perf-wise)
+
+| Component | Why |
+|---|---|
+| `quality.rs` | Already optimal. Single backward pass, no allocation, branch-predictable. Sample data: 0 leaf-level samples in the quality module |
+| `crc32fast` | Already SIMD (samples show `update_fast_16` and `pclmulqdq::calculate`). External crate, not our code |
+| `MultiGzDecoder` (input) | Only 8 samples in 3,950 = 0.2%; not the bottleneck |
+| Output filename construction (`io.rs`) | Two correctness bugs already filed (#244 F3, #245 P3-F2); perf is fine |
+
+## Cross-references
+
+- Sister tracking issue #246 (test coverage) — verification of any perf optimisation depends on the proptest harness landing in CI; happy to PR that separately if useful.
+- Sister tracking issue #247 (CI infrastructure) — `hyperfine` runs would let CI catch perf regressions; not currently wired up.
+- Audit doc (full per-function review): [`docs/plans/2026-04-28_AUDIT_performance.md`](https://github.com/an-altosian/TrimGalore/blob/optimus_prime/docs/plans/2026-04-28_AUDIT_performance.md)
+- Profiling harness: [`examples/profile_smallrna.rs`](https://github.com/an-altosian/TrimGalore/blob/optimus_prime/examples/profile_smallrna.rs)
+- Raw flamegraphs + folded stacks: [`docs/plans/perf_data/`](https://github.com/an-altosian/TrimGalore/tree/optimus_prime/docs/plans/perf_data)
+
+Happy to send a PR for any of the top-3 quick wins. The trivial #1 (gzip level toggle) and #3 (batch size) are good first cuts because they're low-risk and the parity harness verifies byte-identity preservation in ~12 minutes.
+
