@@ -12,11 +12,29 @@
 
 **These are the SAMPLE-BASED findings (after running pprof-rs on 1M reads). The earlier code-review-only predictions were materially wrong — see "Reality vs prediction" below.**
 
-1. **Gzip compression dominates: 62% of CPU time** (cores=1: 224 zlib_rs samples + 26 crc32fast samples = 250/405 total = **62%**). At cores=8, gzip+crc takes 50/74 = **68%** of the (much smaller) sample budget. **The CHANGELOG estimate of "~60%" was right — slightly understated.**
-2. **Trimming algorithms (in `trim_read`): 36% of CPU time** at cores=1 (144/405). Includes adapter alignment (`find_3prime_adapter`), quality trimming, RRBS, clipping — all inlined. This is real algorithmic work, mostly intrinsic to the operations being performed.
-3. **`FastqRecord::write_to` is on the gzip critical path: 246 inclusive samples** at cores=1 — feeding into `write_fmt → write_all → flate2 → zlib_rs::deflate_medium → longest_match`. Currently uses 4 separate `writeln!` calls per record. **Reducing to 1 buffered write per record is a real optimization** — bigger chunks reach deflate at once, saving per-call overhead.
+1. **Gzip compression dominates: 60.7% of CPU time** at cores=1 (10-run merged, 3,950 samples: 51.9% zlib_rs + 8.8% crc32fast). At cores=8, gzip+crc takes **59.1%** (50.6% + 8.5%, 814 merged samples). **The CHANGELOG estimate of "~60%" is essentially exact across both core counts.**
+2. **Trimming algorithms (in `trim_read`): 35.1% at cores=1, 35.6% at cores=8** — the proportional breakdown is essentially constant across core counts, indicating the parallel pipeline scales each subsystem evenly without one becoming a serial bottleneck.
+3. **`FastqRecord::write_to` is the dominant single function: 2,435 inclusive samples (61.6%)** at cores=1 — feeding into `write_fmt → write_all → flate2 → zlib_rs::deflate_medium → longest_match`. Currently uses 4 separate `writeln!` calls per record. **Reducing to 1 buffered write per record is a real optimization** — bigger chunks reach deflate at once.
+4. **`zlib_rs::deflate_medium` (1,968 samples = 49.8%) is the hottest single function**, followed by `longest_match` (1,376 = 34.8%). Both are part of the medium-effort deflate algorithm used at compression level 6. **Lowering compression level from 6 to 4 bypasses `medium` entirely** (level 4 uses `quick`).
 4. **The README claim "near-linear speedup up to ~16 cores" overstates** — actual data shows the knee at **8 cores** (3.27× speedup on 1M reads). Beyond 8 cores, wall-clock plateaus and user time grows, indicating contention overhead.
 5. **`fastq.rs::FastqRecord` uses `String` for sequence/quality** but the impact is small: ~2% of samples involve fastq-module functions. Switching to `Vec<u8>` is still a clean ergonomic improvement (eliminates `.as_bytes()` boilerplate scattered through 8 sites in trimmer.rs) but **its perf impact is negligible** — the original code-review estimate of 5–15% was wildly wrong.
+
+## Methodology revisions
+
+**Run count and averaging**: All wall-clock numbers in this audit are **10-run means with 1 warmup discarded**, measured by `hyperfine 1.20.0`. All sample-percentage breakdowns are **10-run merged samples** (each run's folded-stack file concatenated, then categorically tallied). The original draft of this audit reported single-shot wall-clock and single-run pprof samples — the table immediately above this section now uses proper averaged data, and per-category percentages have been recomputed from the merged 3,950-sample dataset (cores=1) and 814-sample dataset (cores=8).
+
+**Original single-shot vs 10-run-mean comparison**:
+
+| Cores | Original single-shot (s) | 10-run mean (s) | Within mean? |
+|---:|---:|---:|---:|
+| 1 | 3.054 | 3.044 ± 0.009 | ✓ (yes) |
+| 2 | 1.944 | 1.971 ± 0.016 | ✓ (yes) |
+| 4 | 1.141 | 1.171 ± 0.011 | ✓ (1.6 σ) |
+| 8 | 0.935 | 0.954 ± 0.031 | ✓ (yes) |
+| 16 | 1.025 | 0.974 ± 0.028 | ✗ (1.8 σ — slow tail) |
+| 32 | 0.989 | 0.984 ± 0.043 | ✓ (yes) |
+
+The single-shot numbers were within ~5% of the eventual 10-run mean — close, but the cores=16 measurement was on the slow tail of the distribution and led to overconfident claims about the cores=8 → cores=16 step. The corrected story is "cores=8/16/32 are statistically indistinguishable" rather than "knee at 8 with regression at 16".
 
 ## Reality vs prediction (instructive contrast)
 
@@ -45,30 +63,38 @@ The first version of this audit was code-review only because `samply`/`perf` wer
 
 ## Baseline measurements
 
-### Wall-clock scaling on 1M reads (smallRNA_100K × 10)
+### Wall-clock scaling on 1M reads (smallRNA_100K × 10) — 10 runs, hyperfine, 1 warmup discarded
 
-```text
-cores=1   wall=3.054 user=3.042 sys=0.010   (1.00× baseline)
-cores=2   wall=1.944 user=3.853 sys=0.030   (1.57× speedup, 79% efficiency)
-cores=4   wall=1.141 user=3.920 sys=0.010   (2.68× speedup, 67% efficiency)
-cores=8   wall=0.935 user=4.662 sys=0.020   (3.27× speedup, 41% efficiency) ← KNEE
-cores=16  wall=1.025 user=6.191 sys=0.069   (2.98× speedup, 19% efficiency)
-cores=32  wall=0.989 user=6.191 sys=0.041   (3.09× speedup, 9.7% efficiency)
-```
+| Cores | Mean (s) | StdDev | Range (min … max) | Speedup vs cores=1 | User time (s) |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 3.044 | ±0.009 (0.3%) | 3.031 … 3.058 | 1.00× | 3.029 |
+| 2 | 1.971 | ±0.016 (0.8%) | 1.950 … 1.997 | 1.55× | 3.898 |
+| 4 | 1.171 | ±0.011 (0.9%) | 1.158 … 1.195 | 2.60× | 4.018 |
+| **8** | **0.954** | ±0.031 (3.2%) | 0.927 … 1.017 | **3.19×** | 4.677 |
+| 16 | 0.974 | ±0.028 (2.9%) | 0.936 … 1.021 | 3.13× | 5.803 |
+| 32 | 0.984 | ±0.043 (4.4%) | 0.889 … 1.029 | 3.09× | 5.866 |
 
-**Diagnosis**: At 16+ cores, **user time doubles** (3.04s → 6.19s, +103%) without wall-clock improvement. ~3 seconds of CPU is spent on synchronization, allocation, and channel ops at 16 cores. The work-pool can't dispatch fast enough to keep that many workers busy, and gzip-output contention (mpsc channel back to main thread for ordered writing) caps scaling.
+**Diagnosis (statistically corrected)**: cores=8/16/32 confidence intervals overlap heavily (cores=8: [0.892, 1.016]; cores=16: [0.918, 1.030]; cores=32: [0.898, 1.070]). The plateau is real, but **the precise location of the knee is not pinpointable from this data** — the original "knee at 8 cores" claim was on the edge of statistical significance.
 
-### Per-fixture throughput (`--cores 8`)
+What IS confidently true:
 
-```text
-illumina_10K     (10K reads, 960KB)   wall=0.080  → 125,000 reads/s
-BS-seq_10K_R1    (10K reads, 266KB)   wall=0.040  → 250,000 reads/s
-nextera_100K     (100K reads, 3.3MB)  wall=0.124  → 806,000 reads/s
-smallRNA_100K    (100K reads, 2.0MB)  wall=0.098  → 1,020,000 reads/s
-smallRNA_1M      (1M reads, 20MB)     wall=0.935  → 1,070,000 reads/s
-```
+- **User time grows monotonically with cores** (3.0 → 4.0 → 4.7 → 5.8 → 5.9 from 1→4→8→16→32 cores). At 16+ cores, user time roughly doubles vs cores=1 without wall-clock improvement — overhead growth is real.
+- **cores=8 is empirically the fastest mean wall-clock**, but cores=4 (1.171 ± 0.011) is within 23% of it with much tighter variance (3-min stddev vs 30-min stddev). For workloads where consistency matters more than peak throughput, cores=4 may be the better operating point.
+- **The README's "near-linear up to ~16 cores" claim is overstated.** Linear from 1→8 (3.19× on 8 cores = 40% efficiency at cores=8; 80% at cores=2). Non-linear past 8 with diminishing-then-zero returns.
 
-100K-read inputs are dominated by startup + thread spawn (~50–80ms fixed cost). At 1M reads, sustained throughput is **~1M reads/s** at 8 cores. md5 byte-identity holds across `--cores` 1–32 (the multi-core determinism property from CHANGELOG, verified empirically).
+### Per-fixture throughput (`--cores 8`, 10 runs + 1 warmup each)
+
+| Fixture | Reads | Compressed | Mean (ms) | StdDev |
+|---|---:|---:|---:|---:|
+| BS-seq_10K_R1 | 10K | 266 KB | 43.8 | ±15.5 (35%) |
+| illumina_10K | 10K | 960 KB | 79.4 | ±2.1 (2.6%) |
+| smallRNA_100K | 100K | 2.0 MB | 100.5 | ±8.3 (8.3%) |
+| nextera_100K | 100K | 3.3 MB | 131.3 | ±12.2 (9.3%) |
+| smallRNA_1M (synthetic) | 1M | 20 MB | 954 | ±31 (3.2%) |
+
+**The small-fixture results have high variance** (BS-seq_10K_R1 at 35% stddev) — at sub-100ms runtimes, startup + thread-spawn cost dominates and any background system noise blows up the relative variance. **Trust the 1M-read fixture for stable per-cores measurements.** Throughput on the 1M fixture at cores=8 is ~1.05M reads/s.
+
+md5 byte-identity holds across `--cores` 1–32 (the multi-core determinism property from CHANGELOG, verified empirically across all 60 runs).
 
 ## Per-function review
 

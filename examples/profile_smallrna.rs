@@ -74,10 +74,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = make_default_config();
 
-    // Sample at 997 Hz (prime to avoid aliasing). Blocklist common stdlib /
-    // pthread frames so the resulting flamegraph emphasises trim_galore code.
+    // Sample at 4999 Hz (prime, near pprof-rs safe-max on Linux). Blocklist
+    // common stdlib / pthread frames so the resulting flamegraph emphasises
+    // trim_galore code. PROFILE_FREQ overrides if a different rate is needed.
+    let freq: i32 = env_or("PROFILE_FREQ", "4999").parse()?;
     let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(997)
+        .frequency(freq)
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build()?;
 
