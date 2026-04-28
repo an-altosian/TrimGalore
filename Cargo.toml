@@ -48,6 +48,13 @@ serde_json = "1"
 # tests under tests/parity_*.rs that spawn both binaries on generated input.
 proptest = "1"
 rand = "0.8"
+# In-process sampling profiler (SIGPROF-based) — used by examples/profile_*.rs
+# to produce flamegraphs without requiring kernel perf permissions.
+pprof = { version = "0.14", features = ["flamegraph"] }
+
+[[example]]
+name = "profile_smallrna"
+path = "examples/profile_smallrna.rs"
 
 [profile.release]
 opt-level = 3

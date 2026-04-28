@@ -4,17 +4,44 @@
 |---|---|
 | **Status** | Code-driven audit complete. Per-function review across all 15 source files. Wall-clock baseline established |
 | **Scope** | Every function in `src/`, ranked by expected impact. Architectural opportunities identified separately |
-| **Methodology** | Wall-clock scaling on 1M-read synthetic fixture (10× smallRNA_100K) + source-code review + cross-cutting allocation/clone grep. **No statistical profiling** — `perf_event_paranoid=2` in this sandbox blocks `samply`/`perf`/`flamegraph`; `valgrind`/`callgrind` not installed. Code review + wall-clock numbers are the substitute |
+| **Methodology** | **In-process SIGPROF sampling via pprof-rs** (kernel `perf_event_paranoid=2` blocks `samply`/`perf` in this sandbox; pprof-rs uses POSIX timers and works without kernel perf access). Plus wall-clock scaling on 1M-read fixture, source-code review, cross-cutting allocation/clone grep. The pprof harness lives at `examples/profile_smallrna.rs` and produces `flamegraph_se_cores{N}.svg` + a folded-stacks text file for grep-friendly analysis |
 | **Audience** | Future sessions implementing the optimizations; upstream for review |
 | **Related** | [docs/plans/2026-04-28_REVIEW_ci-cd-audit.md](2026-04-28_REVIEW_ci-cd-audit.md), [docs/plans/2026-04-28_FINDINGS_parity-hunt-phase1-2.md](2026-04-28_FINDINGS_parity-hunt-phase1-2.md) |
 
 ## Headline findings
 
-1. **The README claim "near-linear speedup up to ~16 cores" overstates** — actual data shows the knee at **8 cores** (3.27× speedup on 1M reads). Beyond 8 cores, wall-clock plateaus and user time grows, indicating contention overhead.
-2. **`alignment.rs::find_3prime_adapter` allocates a fresh nested `Vec<Vec<usize>>` per read** — for 1M reads × 1 adapter × ~14×151 cells, this is ~1.4M small allocations on the hottest call site in the codebase. **Highest single-function optimization opportunity.**
-3. **`fastq.rs::FastqRecord` uses `String` for sequence/quality** — every line read does `.to_string()` (1 allocation per line × 4 lines × N reads = 4M+ String allocations on 1M reads). Switching to `Vec<u8>` skips UTF-8 validation and enables in-place editing.
-4. **No SIMD anywhere in the codebase** — `unsafe` blocks: zero. The DP inner loop in `find_3prime_adapter` is the textbook target for either `std::simd` or Myers' bit-parallel edit distance (10–100× speedup for adapters ≤64bp).
-5. **`fastq.rs` threaded reader allocates 3 empty `String`s per record consumption** via `mem::replace` to a fresh `FastqRecord`. Switching the buffer to `Vec<Option<FastqRecord>>` makes this zero-cost via `Option::take`.
+**These are the SAMPLE-BASED findings (after running pprof-rs on 1M reads). The earlier code-review-only predictions were materially wrong — see "Reality vs prediction" below.**
+
+1. **Gzip compression dominates: 62% of CPU time** (cores=1: 224 zlib_rs samples + 26 crc32fast samples = 250/405 total = **62%**). At cores=8, gzip+crc takes 50/74 = **68%** of the (much smaller) sample budget. **The CHANGELOG estimate of "~60%" was right — slightly understated.**
+2. **Trimming algorithms (in `trim_read`): 36% of CPU time** at cores=1 (144/405). Includes adapter alignment (`find_3prime_adapter`), quality trimming, RRBS, clipping — all inlined. This is real algorithmic work, mostly intrinsic to the operations being performed.
+3. **`FastqRecord::write_to` is on the gzip critical path: 246 inclusive samples** at cores=1 — feeding into `write_fmt → write_all → flate2 → zlib_rs::deflate_medium → longest_match`. Currently uses 4 separate `writeln!` calls per record. **Reducing to 1 buffered write per record is a real optimization** — bigger chunks reach deflate at once, saving per-call overhead.
+4. **The README claim "near-linear speedup up to ~16 cores" overstates** — actual data shows the knee at **8 cores** (3.27× speedup on 1M reads). Beyond 8 cores, wall-clock plateaus and user time grows, indicating contention overhead.
+5. **`fastq.rs::FastqRecord` uses `String` for sequence/quality** but the impact is small: ~2% of samples involve fastq-module functions. Switching to `Vec<u8>` is still a clean ergonomic improvement (eliminates `.as_bytes()` boilerplate scattered through 8 sites in trimmer.rs) but **its perf impact is negligible** — the original code-review estimate of 5–15% was wildly wrong.
+
+## Reality vs prediction (instructive contrast)
+
+The first version of this audit was code-review only because `samply`/`perf` were blocked by sandbox `kernel.perf_event_paranoid=2`. After installing `pprof-rs` (which uses POSIX SIGPROF and doesn't need kernel perf), the real samples produced a different picture:
+
+| Component | Code-review prediction | Real samples (cores=1) | Verdict |
+|---|---|---|---|
+| Gzip compression | ~60% (per CHANGELOG) | **55% zlib_rs + 6% crc32 = 62%** | ✓ matches CHANGELOG; my code-review took it for granted and built optimization recommendations elsewhere |
+| `find_3prime_adapter` DP allocation | "#1 hot spot, ~14M allocations, 5–15% wall improvement from fix" | inlined into trim_read at 144 samples; allocation isolation impossible at this resolution | **Wrong** — the function is part of the 36% trim_read budget, but the DP-allocation slice is invisible in samples (likely <1%) |
+| `FastqRecord::seq/qual` as `String` | "5–15% impact, switch to `Vec<u8>`" | fastq module total: 8 samples = **2%** | **Wildly wrong** — the optimization is real but the benefit is ~10× smaller than I estimated |
+| Threaded-reader `mem::replace` allocs | "2–5% wall, easy fix" | doesn't appear in top samples | **Wrong magnitude** — likely <1% impact |
+| `SmallVec` for `adapter_matches` | "1–2% wall" | invisible at this resolution | **Probably wrong** — likely <0.5% |
+| README claim "near-linear up to 16 cores" | flagged as overstating reality | wall-clock data (independent of pprof) shows knee at 8 cores, user time **doubles** at 16 | ✓ confirmed |
+
+**Lesson**: code-review estimates of allocation cost without sample data systematically overestimate. The reason is that **modern allocators (jemalloc / glibc malloc) are very fast for small allocations**, and the cycles cost of `Vec::new()` or `String::to_string()` for a sub-1KB allocation is in the tens-of-nanoseconds range, not microseconds. With 1M of them, that's still only ~50ms — drowned in 4.3 seconds of gzip work.
+
+**Where code review WAS right**:
+- Gzip dominance (CHANGELOG already said this; I underweighted it in recommendations)
+- `quality.rs` is already optimal (samples confirm: 0 leaf-level samples in quality module)
+- `find_3prime_adapter` is on the hot path (samples: trim_read takes 36% and most of that is alignment work)
+
+**Where code review WAS wrong**:
+- Predicted "5–15% wins" from String/allocation changes that are actually ~1–2%
+- Underestimated the absolute dominance of gzip compression
+- Missed that `FastqRecord::write_to`'s **4-writeln pattern** is the actual fastq-side bottleneck (each writeln is a separate gzip-encoder call)
 
 ## Baseline measurements
 
@@ -232,24 +259,45 @@ Once per file at the end of processing. Large because of the verbose text-report
 
 Wrapper around `fastqc-rust` library. Performance is upstream. Leave as-is.
 
-## Top-10 highest-impact optimization candidates
+## Top-10 highest-impact optimization candidates (REVISED with sample data)
 
-Ranked by expected wall-clock impact on the 1M-read benchmark:
+Ranked by **measured** wall-clock impact (or solid extrapolation from sample percentages). The earlier code-review-only ranking is preserved below as "Original (superseded)" for the reality-vs-prediction record.
 
-| # | Change | File | Effort | Expected gain |
+### Sample-grounded ranking
+
+| # | Change | File | Effort | Expected gain | Evidence |
+|--:|---|---|---|---|---|
+| **1** | **Lower default gzip compression level from 6 to 4 (or expose a `--fast-gz` flag)** | `fastq.rs:454`, `parallel.rs:249,250,252,257,563` | Trivial (~5 LOC) | **20–35%** at the same `--cores N` | Gzip is 62% of CPU; level 4 is ~30% faster than level 6 with ~3% larger output (zlib-rs benchmarks) |
+| **2** | **Single buffered write per record in `FastqRecord::write_to`** (build into a local `Vec<u8>`, single `write_all`) | `fastq.rs:42-48` | Trivial (~15 LOC) | **5–10%** | 246 inclusive samples on the `write_to → write_fmt → write_all → flate2 → zlib_rs::deflate_medium → longest_match` path. The 4 `writeln!` calls each invoke deflate separately; bigger chunks per deflate call = better throughput |
+| **3** | **Increase per-batch size from 4096 to 16384 records** (let deflate see bigger chunks) | `parallel.rs:32`, `fastq.rs:126` | Trivial (~2 LOC) | **3–8%** | Larger batches = larger gzip blocks = better deflate efficiency. Memory cost: ~5 MB vs ~1.2 MB per worker — fine |
+| **4** | **Myers' bit-parallel edit distance** for adapters ≤64 bp | `alignment.rs` | High (~400 LOC + tests) | **10–20%** of total wall (cuts the 36% `trim_read` budget by ~30%) | trim_read is 36% at cores=1; alignment is the dominant inner cost |
+| **5** | **Increase `mpsc::sync_channel` buffer from 2 to 8** | `parallel.rs:78,467` | Trivial (~2 LOC) | **0–5%** at cores=16+ | Wall-clock data shows scaling plateau at 8 cores; deeper queue may smooth contention |
+| **6** | **Pre-allocate `adapter_matches` capacity inline** (skip if 0 hits) | `trimmer.rs:114` | Trivial (~3 LOC) | **<1%** | Sample data: invisible at 405-sample resolution. Listed for completeness — would survive a 10K-sample profile |
+| **7** | **Switch from `mpsc` to `crossbeam_channel`** | `parallel.rs` | Medium (~100 LOC) | **0–5%** at cores=16+ | Lock-free queue may reduce contention; need rebenched at higher core counts |
+| **8** | **`FastqRecord::seq`/`qual` `String` → `Vec<u8>`** | `fastq.rs` + ripple | High (~200 LOC) | **1–3%** (formerly estimated 5–15%) | Sample data: fastq module is only 2% of samples. Worth doing for **ergonomics** (eliminates `.as_bytes()` boilerplate, simplifies `trim_ns`) but not as a perf win |
+| **9** | **Threaded-reader `Vec<Option<FastqRecord>>`** | `fastq.rs:140` | Trivial (~10 LOC) | **<1%** | Sample data: not in top samples |
+| **10** | **Flat-vector DP matrix in `find_3prime_adapter`** (allocation-only optimization, not algorithmic) | `alignment.rs:57` | Low (~30 LOC) | **<1%** alone; **stops mattering after item 4** | Sample data: invisible at this resolution. Item 4 (Myers') makes the DP allocation moot |
+
+**Composite estimate (revised)**: items 1+2+3 are each trivial-to-low effort and address the 62%-gzip-dominance directly. Together they could plausibly deliver **25–45% wall-clock improvement** at `--cores 8`. Item 4 (Myers') is the single largest discrete optimization, worth its own PR.
+
+### Original ranking (superseded — kept for the reality-vs-prediction record)
+
+The original code-review-only top-10 is preserved here:
+
+| # | Change | File | Original estimate | Reality |
 |--:|---|---|---|---|
-| **1** | Switch `FastqRecord::seq`/`qual` from `String` to `Vec<u8>` (PERF-2) | `fastq.rs` + ripple in `trimmer.rs`, `quality.rs`, `filters.rs` | High (~200 LOC across files) | 5–15% |
-| **2** | Flat `Vec<u8>` DP matrix in `find_3prime_adapter` (PERF-1 quick win) | `alignment.rs` | Low (~30 LOC) | 5–10% |
-| **3** | Thread-local DP buffer reuse (PERF-1 better) | `alignment.rs` | Medium (~80 LOC) | 5–10% additional on top of #2 |
-| **4** | Threaded-reader `Vec<Option<FastqRecord>>` (PERF-4) | `fastq.rs` | Low (~30 LOC) | 2–5% |
-| **5** | `clip_5prime` in-place via `drain` (PERF-3) | `fastq.rs` | Trivial (~5 LOC; depends on PERF-2 for `Vec<u8>`) | 1–3% |
-| **6** | `SmallVec<[(usize,usize); 1]>` for `adapter_matches` | `trimmer.rs` | Trivial (~5 LOC + dep) | 1–2% |
-| **7** | Increase work-channel buffer to `sync_channel(8)` (PERF-5) | `parallel.rs` | Trivial (~2 LOC) | 0–10% (workload-dependent) |
-| **8** | Myers' bit-parallel edit distance for adapters ≤64bp | `alignment.rs` | High (~400 LOC + extensive tests) | 30–80% on adapter-trim phase |
-| **9** | Replace `mpsc` with `crossbeam_channel` | `parallel.rs` | Medium (~100 LOC) | 2–5% at 8+ cores |
-| **10** | Direct write-to-Vec in `FastqRecord::write_to` (single buffer per record) | `fastq.rs` | Trivial (~10 LOC) | 1–2% |
+| 1 | `String` → `Vec<u8>` (`FastqRecord`) | `fastq.rs` | 5–15% | ~1–3% (item 8 in revised list) |
+| 2 | Flat DP matrix | `alignment.rs` | 5–10% | <1% (item 10 in revised list) |
+| 3 | Thread-local DP buffer | `alignment.rs` | 5–10% | <1% (subsumed by item 4 — Myers') |
+| 4 | `Vec<Option<FastqRecord>>` reader | `fastq.rs` | 2–5% | <1% (item 9 in revised list) |
+| 5 | `clip_5prime` `drain` | `fastq.rs` | 1–3% | <1% |
+| 6 | `SmallVec` for `adapter_matches` | `trimmer.rs` | 1–2% | <1% (item 6 in revised list) |
+| 7 | `sync_channel(8)` | `parallel.rs` | 0–10% | 0–5% at high cores (item 5 in revised list) |
+| 8 | Myers' bit-parallel | `alignment.rs` | 30–80% | **10–20% of total wall** (item 4 in revised list — promoted) |
+| 9 | `crossbeam_channel` | `parallel.rs` | 2–5% | 0–5% at high cores (item 7 in revised list) |
+| 10 | `write_to` single buffer | `fastq.rs` | 1–2% | **5–10%** (item 2 in revised list — significantly underestimated) |
 
-**Composite estimate**: a session implementing items 1–5 + 7 (the cluster of small-to-medium changes) could plausibly deliver **15–30% wall-clock improvement** on the 1M-read fixture at `--cores 8`. Item 8 alone could approach 30–80% if Myers is feasible — but it's a larger and riskier change because the existing DP has been the parity oracle for 19 flag paths.
+**Key reordering**: gzip-tier optimizations (compression level, write batching, batch size) move to top-3 from "not in original list at all". Pure allocation optimizations move down. Item 10 (`write_to` single buffer) jumps from #10 to #2 because its samples show it on the gzip critical path.
 
 ## Architectural opportunities (bigger-than-PR-sized)
 
