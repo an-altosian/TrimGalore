@@ -2,20 +2,30 @@
 
 | | |
 |---|---|
-| **Status** | DRAFT — review before filing |
+| **Status** | **FILED 2026-04-28** — all 6 issues live on FelixKrueger/TrimGalore (issues #242 – #247, consecutive) |
 | **Target repo** | `FelixKrueger/TrimGalore` |
 | **Filer** | `an-altosian` (via `gh issue create`) |
 | **Source** | Parity-hunt findings + CI/test audit on `optimus_prime` (commit `41926c7`) |
 | **Total** | 6 issues — 3 bug, 1 discussion, 2 tracking |
 
-Each section below is the literal body to file. Titles include severity tags as agreed.
-After filing, append the resulting issue URL beside each title for traceability.
+## Filed issues — quick links
+
+| # | Title (truncated) | Type | Upstream URL |
+|---|---|---|---|
+| 1 | `--max_n 0.5` (fractional) silently ignored | BUG/HIGH | <https://github.com/FelixKrueger/TrimGalore/issues/243> |
+| 2 | `--clip_r1` lowercase rejected | BUG/HIGH | <https://github.com/FelixKrueger/TrimGalore/issues/242> |
+| 3 | `--basename` PE filename pattern | BUG/HIGH | <https://github.com/FelixKrueger/TrimGalore/issues/244> |
+| 4 | Three behavioural divergences for triage | DISCUSSION | <https://github.com/FelixKrueger/TrimGalore/issues/245> |
+| 5 | Test coverage gaps + bug-derived candidates | TRACKING/TESTS | <https://github.com/FelixKrueger/TrimGalore/issues/246> |
+| 6 | CI / test-infrastructure improvements | TRACKING/CI | <https://github.com/FelixKrueger/TrimGalore/issues/247> |
+
+The body text below is preserved verbatim as filed (with the `**Filed at:**` placeholders now resolved to the URLs above).
 
 ---
 
 ## Issue 1 — `[BUG | HIGH]` `--max_n 0.5` (fractional) silently ignored — outputs as if no filtering applied
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/243
 
 **Body:**
 
@@ -57,7 +67,7 @@ Happy to send a PR if helpful.
 
 ## Issue 2 — `[BUG | HIGH]` `--clip_r1` / `--clip_r2` / `--three_prime_clip_r{1,2}` (lowercase) rejected by Rust
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/242
 
 **Body:**
 
@@ -121,7 +131,7 @@ Happy to send a PR if helpful — the change is ~4 lines.
 
 ## Issue 3 — `[BUG | HIGH]` `--basename foo` with `--paired` produces `foo_R1_val_1.fq.gz` instead of `foo_val_1.fq.gz`
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/244
 
 **Body:**
 
@@ -167,7 +177,7 @@ Found during Phase 1C differential parity hunt: <https://github.com/an-altosian/
 
 ## Issue 4 — `[DISCUSSION]` Three behavioural divergences from Perl 0.6.11 needing classification
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/245
 
 **Body:**
 
@@ -235,7 +245,7 @@ Reproducer: `trim_galore [perl|rust] --paired --retain_unpaired --length 80 -o /
 
 ## Issue 5 — `[TRACKING | TESTS]` Test coverage gaps: zero unit tests in `parallel.rs` / `demux.rs` + 6 bug-derived regression candidates
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/246
 
 **Body:**
 
@@ -272,7 +282,7 @@ Cross-cutting audit doc: <https://github.com/an-altosian/TrimGalore/blob/optimus
 
 ## Issue 6 — `[TRACKING | CI]` CI / test-infrastructure improvements from cross-cutting audit
 
-**Filed at:** _(URL after filing)_
+**Filed at:** https://github.com/FelixKrueger/TrimGalore/issues/247
 
 **Body:**
 
