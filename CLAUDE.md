@@ -8,6 +8,15 @@ Trim Galore — Oxidized Edition — is a Rust rewrite of the original Perl Trim
 
 The active development branch is `optimus_prime`; `master` is retained for the legacy Perl release line. The CI workflow `validation` job md5-compares Oxidized output against Perl Trim Galore 0.6.11 (installed from raw GitHub) for several core flag combinations — preserving byte-identity to v0.6.11 is a hard invariant for those flag paths.
 
+## Active release stream
+
+Stable on crates.io: **v2.0.0**. Current branch is **v2.1.0-beta.5** with a pre-GA validation pass underway via nf-core. Recent fixes (queued for `beta.6`, tracked in `CHANGELOG.md` under "Unreleased"):
+
+- RRBS `Total written (filtered)` bp accounting — `TrimResult` now carries a `bp_after_cutadapt` field captured before RRBS / poly-A/G / N-trim / clipping, restoring byte-for-byte parity with v0.6.x for that line. Trimmed FASTQ output is unchanged; only the reported count.
+- `RUN STATISTICS` filter-removed lines (`too_short`, `too_long`, `too_many_n`, paired `pairs_removed_n`) are now always emitted even at zero — MultiQC's canonical fallback parser greps for the literal line and treats absence as a parse failure.
+
+When changing report-text formatting, check `CHANGELOG.md`'s "Unreleased" block first — the v2.x report intentionally diverges from Perl v0.6.x in four documented places (RRBS quality-trim line shape, dropped adapter family-name annotation, omitted "Bases preceding removed adapters" histogram, modern Cutadapt `floor(L × error_rate)` `max.err` formula). The validation matrix's md5s are pinned to the v2.x shape.
+
 ## Build, lint, test
 
 Requires Rust toolchain (the crate's `rust-version` floor is `1.88`; CI uses `dtolnay/rust-toolchain@stable`). Edition is 2024.
@@ -30,7 +39,23 @@ To reproduce the `validation` CI job locally (md5-compare against Perl Trim Galo
 
 ## Test fixtures
 
-`test_files/` holds gzipped FASTQ fixtures used by both `cargo test` and the CI validation matrix: BS-seq paired-end (`BS-seq_10K_R{1,2}.fastq.gz`), RRBS (`SRR24766921_RRBS_R{1,2}.fastq.gz`), Clock-mode (`clock_10K_R{1,2}.fastq.gz`), demux (`demux_test.fastq.gz` + `demux_test_samplesheet.txt`), poly-A/T, plus negative cases (`colorspace_file.fastq`, `truncated.fq.gz`, `empty_file.fastq`). Tests in `src/cli.rs` reference these by relative path, so `cargo test` must be run from the crate root.
+`test_files/` holds gzipped FASTQ fixtures used by both `cargo test` and the CI validation matrix. Tests in `src/cli.rs` reference these by relative path, so `cargo test` must be run from the crate root.
+
+| Fixture | Exercises |
+|---------|-----------|
+| `BS-seq_10K_R{1,2}.fastq.gz` | BS-seq paired-end |
+| `SRR24766921_RRBS_R{1,2}.fastq.gz` | RRBS (`--rrbs`) |
+| `clock_10K_R{1,2}.fastq.gz` | `--clock` specialty mode |
+| `demux_test.fastq.gz` + `demux_test_samplesheet.txt` | 3' inline barcode demux |
+| `nextera_100K.fastq.gz` + `_trimming_report.txt` | Nextera adapter detection + golden report parity |
+| `smallRNA_100K.fastq.gz` (+ `_R2`) + `_trimming_report.txt` | smallRNA adapter detection + golden report parity |
+| `multi_adapters.fa` | `-a file:` FASTA-loading path |
+| `4_seqs_with_Ns.fastq.gz` | max-N (`--max_n`) filter |
+| `polyAT_R{1,2}.fastq.gz`, `PolyA.fastq.gz`, `PolyT.fastq.gz`, `illumina10K_with_polyA.fastq.gz` | poly-A / poly-T trimming, paired and single-end |
+| `illumina_10K.fastq.gz`, `10K_150bp.fastq.gz` | general Illumina, longer-read scenarios |
+| `colorspace_file.fastq`, `truncated.fq.gz`, `empty_file.fastq` | negative cases — `FastqReader::sanity_check` should fail loudly on each |
+
+The `*_trimming_report.txt` files committed alongside `nextera_100K` and `smallRNA_100K` are golden references — diff against them when changing report formatting, and update intentionally with a `CHANGELOG.md` entry.
 
 ## Architecture
 
@@ -64,6 +89,54 @@ Single binary (`src/main.rs` is the only `[[bin]]`); the rest is a library crate
 
 `fastqc-rust` is exact-pinned (`=1.0.1`). The pin is deliberate: the crate is brand-new (v1.0.0 published 2026-04-26) and any bump should be taken as a deliberate-test event with output-byte-identity re-verified against Java FastQC 0.12.1. The CI `validation` job has a smoke test that asserts (a) `fastqc` is **not** on `$PATH` (so a green run proves the bundled library did the work) and (b) the produced `.zip` contains `summary.txt`, `fastqc_data.txt`, `Images/`, `Icons/`.
 
+The `--fastqc_args` parser in `src/fastqc.rs` accepts only this curated subset (everything else warns and is ignored, so old wrapper scripts pass through cleanly):
+
+| Flag | Effect |
+|------|--------|
+| `--nogroup` | Don't group bases above 50 bp |
+| `--expgroup` | Expand grouping past 50 bp |
+| `--quiet` | Suppress progress messages |
+| `--svg` | Emit SVG plots in addition to PNG |
+| `--nano` | Process Oxford Nanopore long-read data |
+| `--nofilter` | Disable quality pre-filtering |
+| `--casava` | Treat input as Casava-format files |
+| `-t`, `--threads N` | FastQC analysis thread count |
+| `-o`, `--outdir DIR` | Output directory for FastQC reports |
+
+## CI workflows
+
+Three workflows under `.github/workflows/`:
+
+- **`ci.yml`** runs on every push, every PR, and on a nightly `schedule:`. Five jobs:
+  - `rust-tests` — `cargo test` on Ubuntu. Note the release profile (`lto = true`, `codegen-units = 1`) means release builds behave subtly differently from debug; the validation matrix below uses release.
+  - `reproducibility` — builds the binary twice with the same `SOURCE_DATE_EPOCH` and asserts byte-identical output. Don't introduce wall-clock time, hostnames, or absolute paths into the release binary.
+  - `lint` — `cargo fmt --all -- --check` + `cargo clippy --all-targets --release -- -D warnings`. New clippy warnings fail CI.
+  - `audit` — `cargo audit` for known CVEs in dependencies.
+  - `validation` — installs Perl Trim Galore 0.6.11 from a pinned upstream URL via conda and md5-compares Oxidized output against it for SE, PE, hardtrim5, clock, and demux paths. Also asserts `fastqc` is **not** on `$PATH` and that the produced FastQC `.zip` contains the expected entries.
+- **`docs.yml`** auto-deploys the Astro Starlight docs site to GitHub Pages on push-to-`master` that touches `docs/`, `CHANGELOG.md`, or the workflow itself. Two jobs: `build` (`npm ci && npm run build` in `docs/`) and `deploy` (uploads `docs/dist/` as the Pages artifact).
+- **`release.yml`** is tag-driven (`workflow_dispatch` also). Pipeline: `check-release` → matrix `build-binaries` (Linux x86_64/aarch64, macOS Apple Silicon) → `smoke-test-binaries` → matrix `docker-build` (amd64/arm64) → `docker-merge` (multi-arch manifest to `ghcr.io/felixkrueger/trimgalore`) → `smoke-test-docker` → `create-tag-and-release` (GitHub release) → `upload-binaries` → `publish-crate` (crates.io).
+
+## Documentation site
+
+`docs/` is an Astro Starlight site published at <https://felixkrueger.github.io/TrimGalore/>. It's its own npm package — not part of the Rust crate (it's in `Cargo.toml`'s `exclude` list).
+
+```bash
+cd docs
+npm install
+npm run dev      # http://localhost:4321/TrimGalore/
+npm run build    # static build into docs/dist/
+npm run preview  # serve docs/dist/ locally
+```
+
+The release notes page at `docs/src/content/docs/reference/changelog.md` is a copy of the top-level `CHANGELOG.md` with a Starlight frontmatter block prepended and one inline image path rewritten — keep them in sync at release. Two design docs (`docs/DESIGN.md`, `docs/PRODUCT.md`) are `.gitignore`-d on purpose; they're internal scratch.
+
+## Distribution
+
+- **crates.io**: `cargo install trim-galore` (note hyphen — the binary is `trim_galore` with underscore). `Cargo.toml`'s `exclude` list (`docs/`, `.github/`, `test_files/`, `plans/`, `.claude/`, `CLAUDE.md`, `CHANGELOG.md`) keeps the published tarball compact.
+- **bioconda**: `conda install -c bioconda trim-galore` (recipe maintained downstream).
+- **Docker**: multi-stage `Dockerfile` (`rust:1.88-bookworm` builder → `debian:bookworm-slim` runtime, only `procps` + `ca-certificates` added). Multi-arch (amd64+arm64) images on `ghcr.io/felixkrueger/trimgalore`. No Java, no FastQC tarball, no Perl in the runtime image — `fastqc-rust` is statically linked into the binary.
+- **Prebuilt binaries**: Linux (x86_64, aarch64) and macOS (Apple Silicon) on the GitHub Releases page. Intel Mac is `cargo install` only (no prebuilt artifact).
+
 ## Conventions worth knowing
 
 - **No external runtime deps.** Anything that would shell out to `cutadapt`, `pigz`, `fastqc`, or `java` is a regression — the v2.x story is "single static binary".
@@ -71,3 +144,5 @@ Single binary (`src/main.rs` is the only `[[bin]]`); the rest is a library crate
 - **Validation matrix is load-bearing.** The CI `validation` job md5-checks Oxidized output against Perl 0.6.11 for SE, PE, hardtrim5, clock, and demux. If you change any of those code paths, expect to either preserve byte-identity or update the validation job with an explicit reason.
 - **Output-collision pre-flight.** Don't bypass it — it catches issue #216 (case-only aliases on APFS/NTFS silently overwriting).
 - **Em-dashes in user-facing strings.** `--version` provenance uses literal em-dashes; CI grep is content-targeted on that character.
+- **Pure-Rust gzip stack.** `flate2` is configured with `default-features = false, features = ["zlib-rs"]` and `gzp` with `features = ["deflate_rust"]` — no system zlib linkage, which is what makes the binary truly static. Don't switch back to `miniz_oxide` defaults or to a `libz-sys` feature without a benchmark.
+- **Specific-file `git add` only.** `.claude/`, `/plans/`, `/legacy/`, `.nf-test/`, `docs/DESIGN.md`, and `docs/PRODUCT.md` are `.gitignore`-d on purpose. Never `git add -A` or `git add .` from the repo root — it's safe today but the safety relies on the ignore list staying in sync.
